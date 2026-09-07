@@ -16,6 +16,7 @@
 #   "detail"       — optional Dict with structured extras
 #
 # Event code catalogue:
+#   SERIES_MERGE_APPROXIMATE  warning merge_series_lines     inexact merge with structured risk evidence
 #   LINES_MERGED              info    merge_series_lines     two lines fused
 #   LINECODE_MISMATCH         info    merge_series_lines     adjacent linecodes differ — not merged
 #   TERMINAL_MISMATCH         warning merge_series_lines     terminal maps at shared bus differ — not merged
@@ -199,7 +200,11 @@ end
 
 # ── Mutating implementation functions ─────────────────────────────────────────
 
-function _merge_series_lines!(net)
+function _merge_series_lines!(net; series_merge_policy=:allow_approximate,
+                              allow_drop_bus_constraints=false)
+    series_merge_policy in (:exact, :allow_approximate, :off) ||
+        throw(ArgumentError("series_merge_policy must be :exact, :allow_approximate, or :off"))
+    series_merge_policy == :off && return net
     warned_buses = Set{String}()  # suppress duplicate warnings across iterations
     changed = true
     while changed
@@ -265,6 +270,34 @@ function _merge_series_lines!(net)
             l2 = lines[l2_id]
             (get(l1, "bus_from", nothing) == get(l1, "bus_to", nothing) ||
              get(l2, "bus_from", nothing) == get(l2, "bus_to", nothing)) && continue
+
+            # Eliminating this bus must not relocate π shunts or discard study
+            # constraints. A minimum current rating is valid only for a series-
+            # only chain; apparent-power limits depend on the local voltage.
+            constrained_fields = [k for k in ("v_min", "v_max", "vpn_min", "vpn_max",
+                "vpp_min", "vpp_max", "vn_max", "vpos_min", "vpos_max", "vneg_max",
+                "vzero_max", "vuf_max", "va_diff_min", "va_diff_max") if haskey(bus_obj, k)]
+            lcs = get(net, "linecode", Dict())
+            has_power_or_angle_limit(l) = any(k -> haskey(l, k), ("s_max", "va_diff_min", "va_diff_max")) ||
+                haskey(get(lcs, get(l, "linecode", ""), Dict()), "s_max")
+            has_pi = _line_has_shunt(net, l1) || _line_has_shunt(net, l2)
+            drop_bounds = !isempty(constrained_fields)
+            reason = if has_pi && series_merge_policy == :exact
+                "PI_SHUNT_PRESENT"
+            elseif (drop_bounds && (!allow_drop_bus_constraints || series_merge_policy == :exact)) ||
+                   has_power_or_angle_limit(l1) || has_power_or_angle_limit(l2)
+                "INTERMEDIATE_CONSTRAINT"
+            else
+                nothing
+            end
+            if reason !== nothing
+                bus_id in warned_buses && continue
+                push!(warned_buses, bus_id)
+                _simlog!(net, "merge_series_lines", reason, "warning", "bus", bus_id,
+                    "Series merge skipped: exact circuit and constraint preservation is not supported for this chain.",
+                    detail=Dict("lines"=>[l1_id,l2_id], "bus_fields"=>constrained_fields))
+                continue
+            end
 
             lc1 = get(l1, "linecode", nothing)
             lc2 = get(l2, "linecode", nothing)
@@ -374,6 +407,28 @@ function _merge_series_lines!(net)
                     l1["R_series_$(i)_$(j)"] = R1[i, j] + R2[i, j]
                     l1["X_series_$(i)_$(j)"] = X1[i, j] + X2[i, j]
                 end
+            end
+
+            # Approximation support is limited to a shared linecode model.
+            # Inline shunt overrides do not scale with the combined length.
+            if has_pi && any(l -> any(k -> startswith(k, "G_from_") ||
+                    startswith(k, "B_from_") || startswith(k, "G_to_") ||
+                    startswith(k, "B_to_"), keys(l)), (l1, l2))
+                _simlog!(net, "merge_series_lines", "PI_SHUNT_PRESENT", "warning",
+                    "bus", bus_id, "Series merge skipped: inline shunt overrides are unsupported.")
+                continue
+            end
+            if has_pi || drop_bounds
+                _simlog!(net, "merge_series_lines", "SERIES_MERGE_APPROXIMATE", "warning",
+                    "bus", bus_id,
+                    "Approximate series merge: terminal equations or intermediate constraints change; error is not quantified.",
+                    detail=Dict("lines" => [l1_id, l2_id], "removed_bus" => bus_id,
+                        "surviving_line" => l1_id, "linecode" => lc1,
+                        "policy" => string(series_merge_policy), "exact" => false,
+                        "shunts_redistributed" => has_pi,
+                        "segment_current_limit_equivalence_unverified" => has_pi,
+                        "dropped_bus_constraints" => Dict(k => deepcopy(bus_obj[k]) for k in constrained_fields),
+                        "error_quantified" => false, "knowledge_ids" => ["PSK-000013"]))
             end
 
             len1 = Float64(get(l1, "length", 0.0))
@@ -667,7 +722,7 @@ function _collapse_closed_switches!(net)
             # two — max for lower bounds, min for upper. Previously only v_min/
             # v_max survived, so an absorbed bus's tighter scalar bound was lost.
             for (field, op) in (("vpos_min", max), ("vpos_max", min),
-                                ("vneg_max", min), ("vzero_max", min),
+                                ("vneg_max", min), ("vzero_max", min), ("vuf_max", min),
                                 ("vn_max",   min),
                                 ("va_diff_min", max), ("va_diff_max", min))
                 vf = get(bus_f, field, nothing); vt = get(bus_t, field, nothing)
@@ -739,7 +794,8 @@ end
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 """
-    merge_series_lines(net) -> net′
+    merge_series_lines(net; series_merge_policy=:allow_approximate,
+                       allow_drop_bus_constraints=false) -> net′
 
 Return a deep-copied network with consecutive same-linecode lines fused at
 pass-through buses (buses with exactly two line connections and no other
@@ -754,15 +810,27 @@ A pass-through bus is blocked — and a log entry emitted — when:
 - the intermediate bus has grounded terminals (`perfectly_grounded_terminals`):
   code `GROUNDED_BUS` (warning) — the ground fixes terminal voltages and would
   be lost if the bus were deleted
+- nonzero π shunts in `:exact` mode, or unsupported inline shunt overrides:
+  `PI_SHUNT_PRESENT` (warning)
+- intermediate bus bounds, segment apparent-power or angle limits:
+  `INTERMEDIATE_CONSTRAINT` (warning); recovery is not implemented
 - adjacent linecodes differ: code `LINECODE_MISMATCH` (info)
 - terminal maps at the shared bus are incompatible: code `TERMINAL_MISMATCH`
   (warning)
 
+The default `series_merge_policy=:allow_approximate` also combines same-linecode
+π sections by summing lengths, retaining the construction parameters. Each
+inexact merge emits `SERIES_MERGE_APPROXIMATE` with the original line IDs, removed
+bus, redistributed-shunt flag, and dropped constraint values. It does not claim
+small error or preservation of segment current limits. `:exact` refuses these
+merges; `:off` disables series merging. Set `allow_drop_bus_constraints=true`
+in approximate mode to permit removal of intermediate bus bounds separately.
+Segment apparent-power and angle limits remain blockers in every enabled mode.
+
 Successful merges record `_merged_from` on the surviving line and emit
-`LINES_MERGED` (info). The merged corridor's `i_max`/`s_max` is the
+`LINES_MERGED` (info). The merged series-only corridor's `i_max` is the
 element-wise minimum of the two segments' **effective** limits (each segment's
-line-level override if present, else its linecode rating), so no thermal
-constraint is silently relaxed.
+line-level override if present, else its linecode rating), and constraints requiring intermediate voltage recovery block the merge.
 
 This is a **one-way, lossy** transformation: the intermediate bus and the
 absorbed line's per-segment impedance are removed, and the reduction is recorded
@@ -774,10 +842,11 @@ and treat the simplified network as a solve-time compile target — see the
 
 All outcomes are appended to `net′["_simplification_log"]`.
 """
-function merge_series_lines(net::Dict{String,Any})::Dict{String,Any}
+function merge_series_lines(net::Dict{String,Any}; series_merge_policy=:allow_approximate,
+                            allow_drop_bus_constraints=false)::Dict{String,Any}
     net′ = deepcopy(net)
     get!(net′, "_simplification_log", Any[])
-    _merge_series_lines!(net′)
+    _merge_series_lines!(net′; series_merge_policy, allow_drop_bus_constraints)
     net′
 end
 
@@ -859,7 +928,9 @@ end
                      open_switches   = true,
                      closed_switches = true,
                      dangling_lines  = true,
-                     series_lines    = true) -> net′
+                     series_lines    = true,
+                     series_merge_policy = :allow_approximate,
+                     allow_drop_bus_constraints = false) -> net′
 
 Apply selected topology simplifications in order:
 1. `collapse_closed_switches` — merge bus pairs joined by zero-impedance closed switches
@@ -875,12 +946,14 @@ function simplify_network(net::Dict{String,Any};
                           open_switches   = true,
                           closed_switches = true,
                           dangling_lines  = true,
-                          series_lines    = true)::Dict{String,Any}
+                          series_lines    = true,
+                          series_merge_policy = :allow_approximate,
+                          allow_drop_bus_constraints = false)::Dict{String,Any}
     net′ = deepcopy(net)
     get!(net′, "_simplification_log", Any[])
     closed_switches && _collapse_closed_switches!(net′)
     open_switches   && _remove_open_switches!(net′)
     dangling_lines  && _remove_dangling_lines!(net′)
-    series_lines    && _merge_series_lines!(net′)
+    series_lines    && _merge_series_lines!(net′; series_merge_policy, allow_drop_bus_constraints)
     net′
 end
