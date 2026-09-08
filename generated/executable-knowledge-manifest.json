@@ -15,7 +15,7 @@
     "transformer_winding_convention_preservation",
     "unit_base_serialization_invariance"
   ],
-  "corpus_sha256": "415cbabef9b5d54e229892ba6ae88937295e36e068490b94b2f4041cc798ba4f",
+  "corpus_sha256": "ffdc1a2aadbcaf7676f4c85b0f28f25994fbb3ad14537eaa110ce381c0758ace",
   "knowledge_ids": [
     "PSK-000001",
     "PSK-000002",
@@ -50,7 +50,7 @@
   "source_files": [
     {
       "path": "Project.toml",
-      "sha256": "8a2376ae260c069a9848ba64d53237a5467730c26d45e7daf3707e0a09f8199b"
+      "sha256": "cbe8bfbe805b030e7802a56ff526d68eefb676f080c57a58fcc884199f83c8bf"
     },
     {
       "path": "bin/bmopf",
@@ -62,7 +62,7 @@
     },
     {
       "path": "docs/src/dev/opf_engine.md",
-      "sha256": "898b2dcd9ca48c474c95adcf61e45f1ff386cdeae6abdbbcac9eea8702511012"
+      "sha256": "f0b9cb3ac6624aa215441565e33f4668b7e236b474ba70718619d2a7fac9e68a"
     },
     {
       "path": "docs/src/dev/versioning.md",
@@ -70,7 +70,7 @@
     },
     {
       "path": "docs/src/differentiable_extensions.md",
-      "sha256": "ab0156d81c1fbbb26bc34001b923254e3301c1d1183feb814a69019ec7a9827c"
+      "sha256": "b23d7e2a48ee91604c5baa087c3ba490eee8df87b8cec11562ab87b4add94e9a"
     },
     {
       "path": "docs/src/findings.md",
@@ -82,7 +82,7 @@
     },
     {
       "path": "docs/src/opf.md",
-      "sha256": "d089f787834cb5e92a3ebaf84f03692c684b6e5bd88bb3b377ea154f083c578c"
+      "sha256": "2b9d12a17faf871557a0bba5e5ebb05a0f7a94569d8e826df9c537d9c5373495"
     },
     {
       "path": "docs/src/relu_softplus_encoding.md",
@@ -122,7 +122,7 @@
     },
     {
       "path": "ext/BMOPFOpfExt/core.jl",
-      "sha256": "e61a7de7f8429292404dbfdf6b629a28aea4dff873e3e0856d383b0fb957cc3d"
+      "sha256": "c32a46c4274b73cf236c83de375dd2e963b02993dee5b6e63d4dfa2d1fed057f"
     },
     {
       "path": "ext/BMOPFOpfExt/data_utils.jl",
@@ -722,7 +722,7 @@
     },
     {
       "path": "test/opf_tests.jl",
-      "sha256": "250f930c9bb6f62ca2b56d201cadd1343eaf29064890f94a98e838b1ce0fd11e"
+      "sha256": "12a6d9405c39b8b3d7309672467ba7afd7e6f887acae5cb65dcc6a1122b47de4"
     },
     {
       "path": "test/powerflow_comparison_tests.jl",
