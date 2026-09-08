@@ -70,6 +70,67 @@ in the limit. Two properties make it a principled choice:
   pointwise as $\varepsilon\to 0^+$, so the smoothing is a controllable
   approximation.
 
+## 2.1. The native logistic / Swish alternative
+
+For solver backends that expose `logistic` as a native nonlinear primitive,
+BMOPFTools also supports `softplus=:swish`. It replaces each hinge with
+
+```math
+\operatorname{ReLU}^{\varepsilon}_{\mathrm{swish}}(z)
+  = z\,\sigma\!\left(\frac{z}{\varepsilon}\right).
+```
+
+This is the same expression obtained by blending the two adjacent affine
+pieces with a logistic partition of unity. The breakpoint-to-triple encoding,
+relative ε scaling, and per-context operator cache are unchanged; only the
+smooth hinge operator changes. `piecewise_linear_value` selects the matching
+numeric oracle with `encoding=:swish`.
+
+Swish is not a conservative replacement for softplus, and the two err in
+opposite directions. Softplus **over**estimates the hinge everywhere, with a
+one-sided error peaking at $\varepsilon\log 2 \approx 0.6931\varepsilon$ at
+$z = 0$. Swish **under**estimates it everywhere — $z\,\sigma(z/\varepsilon)
+\le \max(z, 0)$ for every $z$ — with a signed error that reaches
+$-0.2785\varepsilon$ on *both* sides of the hinge, at
+$z \approx \pm 1.2785\varepsilon$:
+
+| Encoding | Error sign | Extremum | Attained at |
+|:--|:--|:--|:--|
+| Softplus | $\ge 0$ everywhere | $+0.6931\varepsilon$ | $z = 0$ |
+| Swish | $\le 0$ everywhere | $-0.2785\varepsilon$ | $z \approx \pm 1.2785\varepsilon$ |
+
+So Swish is the *tighter* pointwise approximation of the two; what it gives up
+is structure, not accuracy. Its derivative dips below zero and its second
+derivative changes sign, so it is neither monotone nor convex near a hinge.
+
+A uniform underestimate of each hinge does not make the assembled curve a
+uniform underestimate: where a hinge slope $a_i$ is negative, the term
+$a_i \cdot (\text{negative error})$ is positive. A signed hinge sum can
+therefore **overshoot** a nominal clamp just below a breakpoint, or leak a
+small nonzero value into a deadband. The standard softplus remains the default.
+
+!!! note "Overshoot interacts with the apparent-power circle"
+    Under a `volt_var` profile the engine pins reactive power with the droop
+    equality $Q_k = q_{\text{base}} \cdot f^{VV}(|U_k|)$ and drops the
+    $q_{\min}/q_{\max}$ box bounds — but the apparent-power constraint
+    $\lVert (P_k, Q_k) \rVert \le s_{\max}$ still applies. A curve overshoot
+    large enough to push the pinned $Q_k$ past that circle renders the case
+    infeasible where the softplus encoding solved. The overshoot scales with
+    $\varepsilon$, so if a Swish solve reports infeasibility on a case that
+    solves under softplus, reduce `volt_var_watt_eps` before looking elsewhere.
+
+The native mode emits a JuMP nonlinear expression whose operator head is
+`:logistic`. That is not one of MathOptInterface's default univariate
+operators, so the mode is strictly backend-specific: selecting
+`softplus=:swish` does not imply compatibility with Ipopt, DiffOpt, or any
+solver that does not advertise the logistic primitive — those reject the model
+with `MOI.UnsupportedNonlinearOperator` at `optimize!` rather than solving
+something else. Gurobi (12.0 or newer) is the motivating backend, where
+`:logistic` maps to `GRB_OPCODE_LOGISTIC`; it is also the only one of the
+three encodings Gurobi accepts, so see
+[the solver guide](solvers.md#Gurobi:-the-quadratic-compatible-local-NLP-path)
+before running a control-curve case there.
+
 ## 3. Closed-form first and second derivatives
 
 Because the operator is a single-argument function, BMOPFTools registers it with
@@ -146,6 +207,8 @@ ys = [0.44, 0.0, 0.0, -0.60]
 
 q_exact  = piecewise_linear_value(1.05, xs, ys)
 q_smooth = piecewise_linear_value(1.05, xs, ys; epsilon=2e-3)
+q_swish  = piecewise_linear_value(1.05, xs, ys;
+                                  epsilon=2e-3, encoding=:swish)
 ```
 
 Inside a `model_hook!`, pass a JuMP scalar expression and an **absolute**
@@ -168,10 +231,11 @@ model uses per-unit coordinates. Curve data are fixed finite numbers with
 strictly increasing breakpoints; changing their length or order requires
 rebuilding the JuMP graph.
 
-Calls on the same context and `epsilon` share one cached softplus operator. This
+Calls on the same context and `epsilon` share one cached smooth-ReLU operator. This
 keeps large populations of independently controlled devices compact and avoids
 re-registering identical nonlinear functions. The context's `softplus` mode is
-honoured automatically, including `softplus=:builtin` for DiffOpt workflows.
+honoured automatically, including `softplus=:builtin` for DiffOpt workflows and
+`softplus=:swish` for native-logistic backends.
 The function only returns an expression: callers retain control over equality,
 inequality, current-limit, and topology-realizability constraints.
 
@@ -231,6 +295,14 @@ topology and an untrustworthy derivative.
     not guarantee a representable exponential when divided by a very small
     smoothing width. Test the voltage-to-smoothing range, including solver trial
     points; mathematical equivalence does not imply floating-point equivalence.
+
+!!! warning "Swish changes the curve semantics"
+    `softplus=:swish` is a native-logistic compatibility mode, not merely a
+    numerically different implementation of softplus. It is non-monotone in a
+    narrow region below each hinge, non-convex, and has a two-sided signed
+    approximation error. Use it when backend compatibility is required and
+    validate the resulting droop curve against the exact characteristic and
+    physical device bounds.
 
 For repeated coefficient updates, also follow the
 [parameter-update workflow](@ref opf-parameter-resolves). Operator compatibility,

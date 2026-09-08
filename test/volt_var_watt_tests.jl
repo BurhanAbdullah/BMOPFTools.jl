@@ -51,6 +51,40 @@ const _OPFEXT = Base.get_extension(BMOPFTools, :BMOPFOpfExt)
         end
     end
 
+    @testset "encoding — Swish approximation error" begin
+        # Swish underestimates ReLU *everywhere* (z·σ(z/ε) ≤ max(z,0) for all
+        # z), unlike softplus which overestimates it everywhere. The extremum
+        # of the signed error is ≈ -0.2785ε and is attained on BOTH sides, at
+        # z ≈ ±1.2785ε — compare softplus's one-sided +ε·log(2) at z = 0.
+        ε = 1.0
+        relu(z) = max(z, 0.0)
+        errs = [_OPFEXT._swish_value(z, ε) - relu(z)
+                for z in range(-8.0, 8.0; length=40001)]
+        @test maximum(errs) ≤ 0.0
+        @test minimum(errs) ≈ -0.2784645 atol=1e-6
+
+        for peak_t in (-1.27846, 1.27846)
+            @test _OPFEXT._swish_value(peak_t, ε) - relu(peak_t) ≈
+                  -0.2784645 atol=2e-4
+        end
+
+        @test _OPFEXT._swish_value(-1.0e6, 1e-9) == -0.0
+        @test isfinite(_OPFEXT._swish_value(1.0e6, 1e-9))
+
+        # A hinge sum with mixed-sign slopes turns that uniform underestimate
+        # into a curve *overshoot*: the negative-slope hinge contributes
+        # -a·(negative error) > 0 just below the breakpoint.
+        @test _OPFEXT.curve_value_smooth(
+            1.0, ((-0.8 / 7, 253.0), (0.8 / 7, 260.0)),
+            253.0 - 1.27846, 1.0; encoding=:swish) > 1.0
+
+        @test_throws ArgumentError _OPFEXT.curve_value_smooth(
+            1.0, ((-0.8 / 7, 253.0),), 253.0, 1.0; encoding=:unknown)
+        # Validation does not depend on there being any hinge to evaluate.
+        @test_throws ArgumentError _OPFEXT.curve_value_smooth(
+            1.0, (), 253.0, 1.0; encoding=:unknown)
+    end
+
     # ─────────────────────────────────────────────────────────────────────────
     # Volt-watt: at a stiff high terminal voltage the active-power cap curtails
     # the IBR well below p_max, binding exactly to the smooth curve.

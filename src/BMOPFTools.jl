@@ -28,7 +28,7 @@ using Logging
 using Statistics
 using Graphs
 using JSON3
-using StatsFuns: log1pexp
+using StatsFuns: log1pexp, logistic
 import PowerIO
 
 # The published schema's own `$id`, stamped into `meta.$schema` on write. The
@@ -933,7 +933,8 @@ function _piecewise_linear_hinges(breakpoints::AbstractVector{<:Real},
 end
 
 """
-    piecewise_linear_value(input, breakpoints, values; epsilon=nothing)
+    piecewise_linear_value(input, breakpoints, values;
+                           epsilon=nothing, encoding=:softplus)
 
 Evaluate the continuous piecewise-linear function through corresponding
 `breakpoints` and `values`, clamped flat outside the breakpoint interval.
@@ -941,10 +942,13 @@ Breakpoints must be finite and strictly increasing and both vectors must have
 the same length of at least two.
 
 With the default `epsilon=nothing`, evaluation is exact and retains the PWL
-kinks. Passing a finite `epsilon > 0` replaces every hinge with the smooth
-softplus `epsilon * log1pexp(z / epsilon)`, matching
-[`opf_piecewise_linear_expression`](@ref). `input`, `breakpoints`, and `epsilon`
-must use the same units; `values` determine the output units.
+kinks. Passing a finite `epsilon > 0` replaces every hinge with a smooth
+ReLU surrogate. `encoding=:softplus` uses
+`epsilon * log1pexp(z / epsilon)`. `encoding=:swish` uses
+`z * logistic(z / epsilon)` and is intended to match
+`softplus=:swish` in [`opf_piecewise_linear_expression`](@ref). `input`,
+`breakpoints`, and `epsilon` must use the same units; `values` determine the
+output units.
 
 This numeric method is suitable as an exact control-law oracle outside an
 optimisation model and as a reference for quantifying smoothing error.
@@ -952,9 +956,12 @@ optimisation model and as a reference for quantifying smoothing error.
 function piecewise_linear_value(input::Real,
                                 breakpoints::AbstractVector{<:Real},
                                 values::AbstractVector{<:Real};
-                                epsilon::Union{Nothing,Real}=nothing)
+                                epsilon::Union{Nothing,Real}=nothing,
+                                encoding::Symbol=:softplus)
     u = Float64(input)
     isfinite(u) || throw(ArgumentError("input must be finite"))
+    encoding in (:softplus, :swish) || throw(ArgumentError(
+        "encoding must be :softplus or :swish, got :$encoding"))
     curve = _piecewise_linear_hinges(breakpoints, values)
     if isnothing(epsilon)
         return curve.baseline + sum(
@@ -966,10 +973,21 @@ function piecewise_linear_value(input::Real,
     isfinite(eps) && eps > 0 || throw(ArgumentError(
         "epsilon must be finite and positive, got $epsilon"))
     return curve.baseline + sum(
-        slope * eps * log1pexp((u - knot) / eps)
+        slope * _smooth_relu(u - knot, eps, encoding)
         for (slope, knot) in curve.hinges; init=0.0)
 end
 export piecewise_linear_value
+
+# Smooth ReLU surrogate shared by the numeric oracle and the OPF expression
+# builders. A plain branch keeps this type-stable and allocation-free inside the
+# per-hinge sums; dispatching on `Val(encoding)` would force a dynamic dispatch
+# on every hinge and turn an unknown encoding into a `MethodError`.
+function _smooth_relu(z::Float64, eps::Float64, encoding::Symbol)
+    encoding === :softplus && return eps * log1pexp(z / eps)
+    encoding === :swish && return z * logistic(z / eps)
+    throw(ArgumentError(
+        "encoding must be :softplus or :swish, got :$encoding"))
+end
 
 """
     opf_piecewise_linear_expression(ctx, input, breakpoints, values;
@@ -986,10 +1004,12 @@ positive `epsilon` is the absolute softplus width in the same working units as
 `input` and `breakpoints`. `values` determine the expression's output units.
 
 Operator registration is cached by `epsilon` in `ctx`, so any number of curves
-in one staged OPF context can share the same analytic softplus operator. The
+in one staged OPF context can share the same analytic smooth-ReLU operator. The
 expression follows the context's `softplus` build mode: the numerically stable
-registered operator by default, or the native JuMP expression selected with
-`softplus=:builtin` for DiffOpt compatibility. Curve construction does not add
+registered softplus operator by default, the native `log1p(exp(⋅))` expression
+selected with `softplus=:builtin`, or the native `logistic` primitive selected
+with `softplus=:swish`. The Swish mode is intended for solvers that expose a
+native logistic operator, such as Gurobi. Curve construction does not add
 constraints or modify the staged OPF lifecycle.
 
 Use [`opf_bases`](@ref) to convert physical breakpoints and values to model
@@ -1039,6 +1059,9 @@ effective coordinate system is recorded by [`opf_diagnostic_schema`](@ref) and
 - `softplus=:user_defined` uses the stable registered nonlinear operator.
   Pass `softplus=:builtin` explicitly for wrappers such as DiffOpt that reject
   `MOI.UserDefinedFunction`; the native expression has a narrower safe range.
+  Pass `softplus=:swish` to emit `z * logistic(z / epsilon)` using a native
+  logistic primitive. This mode is solver-specific and does not retain the
+  softplus surrogate's monotonicity or convexity.
 - `model_hook!` is the formulation extension point: a function `hook!(ctx)`
   called after the standard model is built and **before** KCL is enforced and
   the model is solved. Use [`opf_model`](@ref), [`opf_network`](@ref),
@@ -1116,9 +1139,13 @@ An IBR whose `control_profile` declares a `volt_var` and/or `volt_watt`
 sub-object follows a voltage-dependent droop: Volt-watt caps active power,
 `P_k ≤ p_base · f^VW(|U_k|)`, and Volt-var pins reactive power to the curve,
 `Q_k = q_base · f^VV(|U_k|)`. Each piecewise-linear characteristic is encoded as
-a sum of shifted/scaled smooth-ReLU (softplus) terms so the model stays
-differentiable for Ipopt; `volt_var_watt_eps` is the relative corner-smoothing
-(smaller → sharper kinks, larger → smoother). Breakpoint voltages are SI volts
+a sum of shifted/scaled smooth-ReLU terms so the model stays differentiable for
+Ipopt; the default softplus encoding is monotone and convex. Set
+`softplus=:swish` to emit a native `logistic` primitive as
+`z * logistic(z / ε)` for compatible solver backends such as Gurobi. Swish is
+solver-specific and is not monotone or convex near each hinge, so validate its
+signed smoothing error and physical bounds. `volt_var_watt_eps` is the relative
+corner-smoothing (smaller → sharper kinks, larger → smoother). Breakpoint voltages are SI volts
 (phase-to-neutral) regardless of `per_unit`. Supported for SINGLE_PHASE and
 FOUR_LEG IBRs; for THREE_LEG (delta) the droop is ignored (box bounds
 retained) with a warning. Default characteristics for a region (e.g. AS/NZS
@@ -1161,7 +1188,8 @@ interpret the result.
 Requires JuMP and a compatible optimizer (same as `solve_opf`).
 For cases with Volt-var/Volt-watt profiles, pass `softplus=:builtin` explicitly
 when using a DiffOpt nonlinear wrapper; its current backend rejects the stable
-default's user-defined nonlinear operator.
+default's user-defined nonlinear operator. Pass `softplus=:swish` for a native
+`logistic`-based encoding on a solver that supports that primitive.
 
 Additional result keys beyond `solve_opf`:
 - `"objective"`                  — squared-slack metric in solver working
@@ -1198,7 +1226,8 @@ Requires JuMP and a compatible optimizer (same as `solve_opf`). The result dict 
 `solve_opf`'s structure plus `"is_power_flow" => true`.
 For cases with Volt-var/Volt-watt profiles, pass `softplus=:builtin` explicitly
 when using a DiffOpt nonlinear wrapper; its current backend rejects the stable
-default's user-defined nonlinear operator.
+default's user-defined nonlinear operator. Pass `softplus=:swish` for a native
+`logistic`-based encoding on a solver that supports that primitive.
 """
 function solve_pf end
 export solve_pf

@@ -15,7 +15,7 @@
     "transformer_winding_convention_preservation",
     "unit_base_serialization_invariance"
   ],
-  "corpus_sha256": "ffdc1a2aadbcaf7676f4c85b0f28f25994fbb3ad14537eaa110ce381c0758ace",
+  "corpus_sha256": "a168f2be0ea0e689a651f96a9f2cedb59c0642a5b91f25018d48c86c024052ec",
   "knowledge_ids": [
     "PSK-000001",
     "PSK-000002",
@@ -70,7 +70,7 @@
     },
     {
       "path": "docs/src/differentiable_extensions.md",
-      "sha256": "b23d7e2a48ee91604c5baa087c3ba490eee8df87b8cec11562ab87b4add94e9a"
+      "sha256": "f493cdbc843fbe72c15d7597109e3c897dffdbbbe3367836d06baaa817d23f1d"
     },
     {
       "path": "docs/src/findings.md",
@@ -82,11 +82,11 @@
     },
     {
       "path": "docs/src/opf.md",
-      "sha256": "2b9d12a17faf871557a0bba5e5ebb05a0f7a94569d8e826df9c537d9c5373495"
+      "sha256": "3aab8baafd6d17fa21fc916b8634d81b3e9923cd0cc5d2313ae715bed02e29d0"
     },
     {
       "path": "docs/src/relu_softplus_encoding.md",
-      "sha256": "56ccb1129e1b1f8b8ef5c6e072cb7a4b65b467e81f878c6ec0d90f22f1f6749d"
+      "sha256": "cebad4675e77975c4839a09d9f08b6941dcb5a475a92064f61a9261877de79a8"
     },
     {
       "path": "docs/src/tutorial_custom_formulations.md",
@@ -122,7 +122,7 @@
     },
     {
       "path": "ext/BMOPFOpfExt/core.jl",
-      "sha256": "c32a46c4274b73cf236c83de375dd2e963b02993dee5b6e63d4dfa2d1fed057f"
+      "sha256": "fe97c5597d2e5cc3a2547a2f8e25528aa63032589f08caa78b451dc4d5814ceb"
     },
     {
       "path": "ext/BMOPFOpfExt/data_utils.jl",
